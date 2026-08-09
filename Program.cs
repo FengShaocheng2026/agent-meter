@@ -12,6 +12,7 @@ internal static class Program
     {
         if (args.Contains("--self-test", StringComparer.OrdinalIgnoreCase))
         {
+            CodexQuotaReader.SelfTest();
             MeterRenderer.SelfTest();
             return;
         }
@@ -23,25 +24,18 @@ internal static class Program
 
 internal sealed class TaskbarMeterForm : Form
 {
-    private static readonly ProbeState[] States =
-    [
-        new(100, "Codex 剩余 100% | 1 周额度 | 8 月 16 日重置"),
-        new(84, "Codex 剩余 84% | 1 周额度 | 8 月 16 日重置"),
-        new(7, "Codex 剩余 7% | 1 周额度 | 8 月 16 日重置"),
-        new(null, "Codex 额度暂不可用")
-    ];
-
     private readonly ToolTip toolTip = new();
-    private readonly ToolStripMenuItem systemStyleItem;
-    private readonly ToolStripMenuItem accentStyleItem;
-    private int stateIndex = 1;
-    private MeterStyle meterStyle = MeterStyle.SystemMinimal;
+    private readonly System.Windows.Forms.Timer refreshTimer = new() { Interval = 60_000 };
+    private readonly CodexQuotaReader quotaReader = new();
+    private readonly QuotaDetailsForm detailsForm;
+    private QuotaDisplayState state = QuotaDisplayState.CreateLoading();
     private bool hovered;
+    private bool refreshing;
 
     public TaskbarMeterForm()
     {
-        Text = "AgentMeter taskbar probe";
-        AccessibleName = States[stateIndex].Tooltip;
+        Text = "AgentMeter";
+        AccessibleName = state.Tooltip;
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.Manual;
@@ -50,27 +44,22 @@ internal sealed class TaskbarMeterForm : Form
         TransparencyKey = BackColor;
         DoubleBuffered = true;
 
-        var menu = new ContextMenuStrip();
-        for (var index = 0; index < States.Length; index++)
-        {
-            var selectedIndex = index;
-            menu.Items.Add($"显示 {States[index].Label}", null, (_, _) => ApplyState(selectedIndex));
-        }
+        detailsForm = new QuotaDetailsForm();
+        detailsForm.RefreshRequested += async (_, _) => await RefreshQuotaAsync();
 
-        menu.Items.Add(new ToolStripSeparator());
-        systemStyleItem = new ToolStripMenuItem("样式：系统极简", null, (_, _) => ApplyStyle(MeterStyle.SystemMinimal));
-        accentStyleItem = new ToolStripMenuItem("样式：状态强调", null, (_, _) => ApplyStyle(MeterStyle.StatusAccent));
-        menu.Items.Add(systemStyleItem);
-        menu.Items.Add(accentStyleItem);
+        var menu = new ContextMenuStrip();
+        menu.Items.Add("打开额度详情", null, (_, _) => ToggleDetails());
+        menu.Items.Add("立即刷新", null, async (_, _) => await RefreshQuotaAsync());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("退出", null, (_, _) => Close());
         ContextMenuStrip = menu;
-        UpdateStyleChecks();
 
         toolTip.InitialDelay = 250;
         toolTip.ReshowDelay = 100;
         toolTip.AutoPopDelay = 10000;
         UpdateTooltip();
+
+        refreshTimer.Tick += async (_, _) => await RefreshQuotaAsync();
     }
 
     protected override bool ShowWithoutActivation => true;
@@ -91,12 +80,14 @@ internal sealed class TaskbarMeterForm : Form
         try
         {
             AttachToTaskbar();
+            refreshTimer.Start();
+            BeginInvoke(async () => await RefreshQuotaAsync());
         }
         catch (Exception exception)
         {
             MessageBox.Show(
                 $"无法挂载到 Windows 任务栏。\n\n{exception.Message}",
-                "AgentMeter 探针",
+                "AgentMeter",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error);
             Close();
@@ -106,7 +97,7 @@ internal sealed class TaskbarMeterForm : Form
     protected override void OnPaint(PaintEventArgs eventArgs)
     {
         base.OnPaint(eventArgs);
-        MeterRenderer.Draw(eventArgs.Graphics, ClientSize, States[stateIndex], meterStyle, hovered);
+        MeterRenderer.Draw(eventArgs.Graphics, ClientSize, state, hovered);
     }
 
     protected override void OnMouseEnter(EventArgs eventArgs)
@@ -128,7 +119,7 @@ internal sealed class TaskbarMeterForm : Form
         base.OnMouseClick(eventArgs);
         if (eventArgs.Button == MouseButtons.Left)
         {
-            ApplyState((stateIndex + 1) % States.Length);
+            ToggleDetails();
         }
     }
 
@@ -136,34 +127,66 @@ internal sealed class TaskbarMeterForm : Form
     {
         if (disposing)
         {
+            refreshTimer.Dispose();
             toolTip.Dispose();
+            detailsForm.Dispose();
         }
 
         base.Dispose(disposing);
     }
 
-    private void ApplyState(int index)
+    private async Task RefreshQuotaAsync()
     {
-        stateIndex = index;
-        AccessibleName = States[stateIndex].Tooltip;
+        if (refreshing)
+        {
+            return;
+        }
+
+        refreshing = true;
+        detailsForm.SetRefreshing(true);
+        try
+        {
+            state = QuotaDisplayState.Available(await quotaReader.ReadAsync());
+        }
+        catch (Exception exception)
+        {
+            state = QuotaDisplayState.Unavailable(exception.Message);
+        }
+        finally
+        {
+            refreshing = false;
+            detailsForm.SetRefreshing(false);
+            ApplyState();
+        }
+    }
+
+    private void ApplyState()
+    {
+        AccessibleName = state.Tooltip;
+        detailsForm.ApplyState(state);
         UpdateTooltip();
         Invalidate();
     }
 
-    private void ApplyStyle(MeterStyle style)
+    private void ToggleDetails()
     {
-        meterStyle = style;
-        UpdateStyleChecks();
-        Invalidate();
+        if (detailsForm.Visible)
+        {
+            detailsForm.Hide();
+            return;
+        }
+
+        detailsForm.ApplyState(state);
+        var meterBounds = RectangleToScreen(ClientRectangle);
+        var screen = Screen.FromRectangle(meterBounds).WorkingArea;
+        var x = Math.Clamp(meterBounds.Left, screen.Left + 8, screen.Right - detailsForm.Width - 8);
+        var y = Math.Max(screen.Top + 8, meterBounds.Top - detailsForm.Height - 8);
+        detailsForm.Location = new Point(x, y);
+        detailsForm.Show();
+        detailsForm.Activate();
     }
 
-    private void UpdateStyleChecks()
-    {
-        systemStyleItem.Checked = meterStyle == MeterStyle.SystemMinimal;
-        accentStyleItem.Checked = meterStyle == MeterStyle.StatusAccent;
-    }
-
-    private void UpdateTooltip() => toolTip.SetToolTip(this, States[stateIndex].Tooltip);
+    private void UpdateTooltip() => toolTip.SetToolTip(this, state.Tooltip);
 
     private void AttachToTaskbar()
     {
@@ -190,7 +213,7 @@ internal sealed class TaskbarMeterForm : Form
         }
 
         var height = taskbarRect.Bottom - taskbarRect.Top;
-        var width = (int)Math.Round(height * 1.85);
+        var width = (int)Math.Round(height * 2.25);
         var margin = Math.Max(8, (int)Math.Round(height * 0.14));
         if (!NativeMethods.SetWindowPos(
                 Handle,
@@ -206,61 +229,236 @@ internal sealed class TaskbarMeterForm : Form
     }
 }
 
-internal sealed record ProbeState(int? Remaining, string Tooltip)
+internal sealed class QuotaDetailsForm : Form
 {
-    public string Label => Remaining?.ToString() ?? "--";
-}
+    private QuotaDisplayState state = QuotaDisplayState.CreateLoading();
+    private bool refreshing;
+    private Rectangle refreshBounds;
 
-internal enum MeterStyle
-{
-    SystemMinimal,
-    StatusAccent
+    public QuotaDetailsForm()
+    {
+        Text = "Codex 额度";
+        FormBorderStyle = FormBorderStyle.None;
+        ShowInTaskbar = false;
+        StartPosition = FormStartPosition.Manual;
+        TopMost = true;
+        AutoScaleMode = AutoScaleMode.None;
+        BackColor = Color.FromArgb(35, 35, 35);
+        DoubleBuffered = true;
+        Cursor = Cursors.Default;
+        _ = Handle;
+        Hide();
+        ApplyState(state);
+    }
+
+    public event EventHandler? RefreshRequested;
+
+    public void ApplyState(QuotaDisplayState newState)
+    {
+        state = newState;
+        var rowCount = Math.Max(1, state.Snapshot?.Windows.Count ?? 0);
+        var scale = GetDpiScale();
+        ClientSize = new Size(
+            (int)Math.Round(480 * scale),
+            (int)Math.Round((88 + rowCount * 112 + 80) * scale));
+        AccessibleName = state.Tooltip;
+        Invalidate();
+    }
+
+    public void SetRefreshing(bool value)
+    {
+        refreshing = value;
+        Invalidate();
+    }
+
+    protected override void OnPaint(PaintEventArgs eventArgs)
+    {
+        base.OnPaint(eventArgs);
+        var graphics = eventArgs.Graphics;
+        graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        graphics.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+        var scale = graphics.DpiX / 96f;
+
+        using var titleFont = new Font("Segoe UI Semibold", 13.5f);
+        using var bodyFont = new Font("Segoe UI", 10.5f);
+        using var valueFont = new Font("Segoe UI Semibold", 11.5f);
+        using var textBrush = new SolidBrush(Color.FromArgb(240, 240, 240));
+        using var mutedBrush = new SolidBrush(Color.FromArgb(175, 175, 175));
+        using var separator = new Pen(Color.FromArgb(65, 255, 255, 255));
+
+        graphics.DrawString("Codex 额度", titleFont, textBrush, 28 * scale, 24 * scale);
+        DrawConnectionStatus(graphics, bodyFont, scale);
+
+        var top = 88f * scale;
+        if (state.Snapshot is { } snapshot)
+        {
+            foreach (var window in snapshot.Windows)
+            {
+                DrawQuotaRow(graphics, window, top, scale, bodyFont, valueFont, textBrush, mutedBrush);
+                top += 112 * scale;
+            }
+        }
+        else
+        {
+            using var unavailableBrush = new SolidBrush(Color.FromArgb(255, 190, 105));
+            graphics.DrawString(
+                state.Loading ? "正在读取本机 Codex 额度…" : "无法读取 Codex 额度，不显示缓存或模拟数据。",
+                bodyFont,
+                state.Loading ? mutedBrush : unavailableBrush,
+                new RectangleF(28 * scale, top + 16 * scale, ClientSize.Width - 56 * scale, 58 * scale));
+            top += 112 * scale;
+        }
+
+        graphics.DrawLine(separator, 28 * scale, top + 4 * scale, ClientSize.Width - 28 * scale, top + 4 * scale);
+        var source = state.Snapshot is { } current
+            ? $"本机 Codex · {FormatFreshness(current.UpdatedAt)}"
+            : "本机 Codex · 已断开";
+        graphics.DrawString(source, bodyFont, mutedBrush, 28 * scale, top + 31 * scale);
+
+        refreshBounds = new Rectangle(
+            ClientSize.Width - (int)Math.Round(104 * scale),
+            (int)Math.Round(top + 21 * scale),
+            (int)Math.Round(76 * scale),
+            (int)Math.Round(40 * scale));
+        using var refreshBackground = new SolidBrush(Color.FromArgb(48, 255, 255, 255));
+        using var refreshPath = MeterRenderer.RoundedRectangle(refreshBounds, 7 * scale);
+        graphics.FillPath(refreshBackground, refreshPath);
+        var refreshText = refreshing ? "刷新中" : "刷新";
+        var refreshSize = graphics.MeasureString(refreshText, bodyFont);
+        graphics.DrawString(
+            refreshText,
+            bodyFont,
+            textBrush,
+            refreshBounds.Left + (refreshBounds.Width - refreshSize.Width) / 2,
+            refreshBounds.Top + (refreshBounds.Height - refreshSize.Height) / 2);
+    }
+
+    protected override void OnMouseMove(MouseEventArgs eventArgs)
+    {
+        base.OnMouseMove(eventArgs);
+        Cursor = refreshBounds.Contains(eventArgs.Location) ? Cursors.Hand : Cursors.Default;
+    }
+
+    protected override void OnMouseClick(MouseEventArgs eventArgs)
+    {
+        base.OnMouseClick(eventArgs);
+        if (eventArgs.Button == MouseButtons.Left && refreshBounds.Contains(eventArgs.Location) && !refreshing)
+        {
+            RefreshRequested?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
+    private void DrawConnectionStatus(Graphics graphics, Font font, float scale)
+    {
+        var connected = state.Snapshot is not null;
+        var color = connected ? Color.FromArgb(100, 210, 135) : Color.FromArgb(255, 184, 95);
+        var label = connected ? "实时" : state.Loading ? "连接中" : "断开";
+        using var brush = new SolidBrush(color);
+        var size = graphics.MeasureString(label, font);
+        var labelX = ClientSize.Width - 28 * scale - size.Width;
+        graphics.FillEllipse(brush, labelX - 14 * scale, 32 * scale, 7 * scale, 7 * scale);
+        graphics.DrawString(label, font, brush, labelX, 24 * scale);
+    }
+
+    private static void DrawQuotaRow(
+        Graphics graphics,
+        QuotaWindow window,
+        float top,
+        float scale,
+        Font bodyFont,
+        Font valueFont,
+        Brush textBrush,
+        Brush mutedBrush)
+    {
+        graphics.DrawString(window.Label, bodyFont, mutedBrush, 28 * scale, top);
+        var percentText = $"{window.RemainingPercent}%";
+        var percentSize = graphics.MeasureString(percentText, valueFont);
+        graphics.DrawString(percentText, valueFont, textBrush, 452 * scale - percentSize.Width, top);
+
+        var track = new Rectangle(
+            (int)Math.Round(28 * scale),
+            (int)Math.Round(top + 38 * scale),
+            (int)Math.Round(424 * scale),
+            Math.Max(8, (int)Math.Round(8 * scale)));
+        using var trackBrush = new SolidBrush(Color.FromArgb(75, 255, 255, 255));
+        using var valueBrush = new SolidBrush(MeterRenderer.StatusColor(window.RemainingPercent));
+        using var trackPath = MeterRenderer.RoundedRectangle(track, 4 * scale);
+        graphics.FillPath(trackBrush, trackPath);
+        if (window.RemainingPercent > 0)
+        {
+            var value = new Rectangle(
+                track.X,
+                track.Y,
+                Math.Max((int)Math.Round(7 * scale), track.Width * window.RemainingPercent / 100),
+                track.Height);
+            using var valuePath = MeterRenderer.RoundedRectangle(value, 4 * scale);
+            graphics.FillPath(valueBrush, valuePath);
+        }
+
+        graphics.DrawString($"已用 {window.UsedPercent}%", bodyFont, mutedBrush, 28 * scale, top + 63 * scale);
+        var resetText = $"{FormatReset(window.ResetsAt)}重置";
+        var resetSize = graphics.MeasureString(resetText, bodyFont);
+        graphics.DrawString(resetText, bodyFont, mutedBrush, 452 * scale - resetSize.Width, top + 63 * scale);
+    }
+
+    private float GetDpiScale()
+    {
+        using var graphics = CreateGraphics();
+        return Math.Max(1f, graphics.DpiX / 96f);
+    }
+
+    private static string FormatReset(DateTimeOffset reset)
+    {
+        var local = reset.ToLocalTime();
+        return local.Date == DateTimeOffset.Now.Date
+            ? local.ToString("HH:mm ")
+            : local.ToString("M 月 d 日 ");
+    }
+
+    private static string FormatFreshness(DateTimeOffset updatedAt)
+    {
+        var age = DateTimeOffset.Now - updatedAt;
+        return age < TimeSpan.FromMinutes(1) ? "刚刚更新" : $"{Math.Max(1, (int)age.TotalMinutes)} 分钟前更新";
+    }
 }
 
 internal static class MeterRenderer
 {
-    public static void Draw(Graphics graphics, Size size, ProbeState state, MeterStyle style, bool hovered)
+    public static void Draw(Graphics graphics, Size size, QuotaDisplayState state, bool hovered)
     {
         graphics.SmoothingMode = SmoothingMode.AntiAlias;
         graphics.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
 
         var scale = size.Height / 48f;
-        if (style == MeterStyle.StatusAccent || hovered)
-        {
-            using var backgroundPath = RoundedRectangle(
-                new RectangleF(2f * scale, 5f * scale, size.Width - 4f * scale, size.Height - 10f * scale),
-                7f * scale);
-            using var background = new SolidBrush(style == MeterStyle.StatusAccent
-                ? Color.FromArgb(38, 38, 38)
-                : Color.FromArgb(54, 54, 54));
-            graphics.FillPath(background, backgroundPath);
-        }
+        using var backgroundPath = RoundedRectangle(
+            new RectangleF(2f * scale, 5f * scale, size.Width - 4f * scale, size.Height - 10f * scale),
+            7f * scale);
+        using var background = new SolidBrush(hovered ? Color.FromArgb(58, 58, 58) : Color.FromArgb(42, 42, 42));
+        graphics.FillPath(background, backgroundPath);
 
         var iconSize = 22f * scale;
         var iconBounds = new RectangleF(8f * scale, (size.Height - iconSize) / 2f, iconSize, iconSize);
-
         using var trackPen = new Pen(Color.FromArgb(90, 255, 255, 255), 2f * scale)
         {
             StartCap = LineCap.Round,
             EndCap = LineCap.Round
         };
-        using var valuePen = new Pen(
-            style == MeterStyle.StatusAccent ? StatusColor(state.Remaining) : Color.White,
-            2.8f * scale)
+        using var valuePen = new Pen(StatusColor(state.Metric?.RemainingPercent), 2.8f * scale)
         {
             StartCap = LineCap.Round,
             EndCap = LineCap.Round
         };
         graphics.DrawArc(trackPen, iconBounds, 135, 270);
-        if (state.Remaining is int remaining)
+        if (state.Metric is { } metric)
         {
-            graphics.DrawArc(valuePen, iconBounds, 135, Math.Max(7, 270f * remaining / 100f));
+            graphics.DrawArc(valuePen, iconBounds, 135, Math.Max(7, 270f * metric.RemainingPercent / 100f));
         }
 
-        var number = state.Label;
-        using var numberFont = new Font("Segoe UI Semibold", 19f * scale, FontStyle.Regular, GraphicsUnit.Pixel);
-        using var percentFont = new Font("Segoe UI", 13f * scale, FontStyle.Regular, GraphicsUnit.Pixel);
+        var number = state.Metric is { } current ? $"{current.RemainingPercent}%" : state.Loading ? "…" : "—";
+        using var numberFont = new Font("Segoe UI Semibold", 17f * scale, FontStyle.Regular, GraphicsUnit.Pixel);
+        using var contextFont = new Font("Segoe UI", 12f * scale, FontStyle.Regular, GraphicsUnit.Pixel);
         using var brush = new SolidBrush(Color.White);
+        using var mutedBrush = new SolidBrush(Color.FromArgb(185, 205, 215));
         using var format = new StringFormat(StringFormat.GenericTypographic)
         {
             Alignment = StringAlignment.Near,
@@ -271,35 +469,31 @@ internal static class MeterRenderer
         var numberTop = (size.Height - numberSize.Height) / 2f;
         graphics.DrawString(number, numberFont, brush, new PointF(textLeft, numberTop), format);
 
-        if (state.Remaining is not null)
+        if (state.Metric is { } window)
         {
-            var percentSize = graphics.MeasureString("%", percentFont, PointF.Empty, format);
-            var percentTop = numberTop + numberSize.Height - percentSize.Height - 1f * scale;
-            graphics.DrawString("%", percentFont, brush, new PointF(textLeft + numberSize.Width, percentTop), format);
+            var contextTop = numberTop + numberSize.Height - graphics.MeasureString(window.ShortLabel, contextFont).Height;
+            graphics.DrawString(window.ShortLabel, contextFont, mutedBrush, new PointF(textLeft + numberSize.Width + 5f * scale, contextTop), format);
         }
     }
 
     public static void SelfTest()
     {
-        foreach (var state in new[]
-                 {
-                     new ProbeState(100, "test"),
-                     new ProbeState(84, "test"),
-                     new ProbeState(7, "test"),
-                     new ProbeState(null, "test")
-                 })
+        var available = QuotaDisplayState.Available(new QuotaSnapshot(
+            [new QuotaWindow("1 周", "周", 1, 99, DateTimeOffset.Now.AddDays(7))],
+            DateTimeOffset.Now));
+        foreach (var state in new[] { available, QuotaDisplayState.CreateLoading(), QuotaDisplayState.Unavailable("test") })
         {
-            foreach (var style in Enum.GetValues<MeterStyle>())
-            {
-                using var bitmap = new Bitmap(155, 84);
-                using var graphics = Graphics.FromImage(bitmap);
-                Draw(graphics, bitmap.Size, state, style, hovered: false);
-                Draw(graphics, bitmap.Size, state, style, hovered: true);
-            }
+            using var bitmap = new Bitmap(190, 84);
+            using var graphics = Graphics.FromImage(bitmap);
+            Draw(graphics, bitmap.Size, state, hovered: false);
+            Draw(graphics, bitmap.Size, state, hovered: true);
         }
     }
 
-    private static GraphicsPath RoundedRectangle(RectangleF bounds, float radius)
+    public static GraphicsPath RoundedRectangle(Rectangle bounds, float radius) =>
+        RoundedRectangle(new RectangleF(bounds.X, bounds.Y, bounds.Width, bounds.Height), radius);
+
+    public static GraphicsPath RoundedRectangle(RectangleF bounds, float radius)
     {
         var diameter = radius * 2;
         var path = new GraphicsPath();
@@ -311,13 +505,28 @@ internal static class MeterRenderer
         return path;
     }
 
-    private static Color StatusColor(int? remaining) => remaining switch
+    public static Color StatusColor(int? remaining) => remaining switch
     {
-        >= 50 => Color.FromArgb(50, 205, 120),
-        >= 20 => Color.FromArgb(255, 183, 77),
-        >= 0 => Color.FromArgb(255, 93, 93),
-        _ => Color.FromArgb(170, 170, 170)
+        >= 50 => Color.FromArgb(82, 195, 120),
+        >= 20 => Color.FromArgb(235, 170, 70),
+        >= 0 => Color.FromArgb(245, 95, 95),
+        _ => Color.FromArgb(150, 150, 150)
     };
+}
+
+internal sealed record QuotaDisplayState(QuotaSnapshot? Snapshot, bool Loading, string? Error)
+{
+    public QuotaWindow? Metric => Snapshot?.Windows.OrderBy(window => window.RemainingPercent).FirstOrDefault();
+
+    public string Tooltip => Snapshot is { } snapshot
+        ? string.Join("\n", snapshot.Windows.Select(window =>
+              $"Codex {window.Label}剩余 {window.RemainingPercent}% | {window.ResetsAt.ToLocalTime():M 月 d 日 HH:mm} 重置"))
+          + $"\n本机 Codex | {snapshot.UpdatedAt:HH:mm:ss} 更新"
+        : Loading ? "正在读取本机 Codex 额度" : $"Codex 额度暂不可用 | {Error}";
+
+    public static QuotaDisplayState Available(QuotaSnapshot snapshot) => new(snapshot, false, null);
+    public static QuotaDisplayState CreateLoading() => new(null, true, null);
+    public static QuotaDisplayState Unavailable(string error) => new(null, false, error);
 }
 
 internal static class NativeMethods

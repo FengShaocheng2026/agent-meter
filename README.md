@@ -1,22 +1,24 @@
 # AgentMeter
 
-AgentMeter is a lightweight Windows app for viewing AI agent quotas, usage, and cost in one place.
+AgentMeter is a lightweight Windows taskbar companion for viewing the current Codex quota.
 
 ## Status
 
-Visual feasibility probe. A small companion window embedded into the Windows 11 taskbar displays the Codex icon and remaining quota without requiring a hover; hovering shows the quota window and reset time.
+A small companion window embedded into the Windows 11 taskbar displays the most constrained live Codex quota. Click it to see every quota window returned by the local Codex app server, its reset time, connection state, and last refresh.
 
-The probe uses simulated values only. Codex data integration comes after visual acceptance.
+AgentMeter reads `account/rateLimits/read` from the locally installed Codex CLI. It does not ask for, store, or print account tokens or cookies. The app-server protocol is experimental and may change with Codex CLI updates.
 
-## Run the visual probe
+## Run
 
 ```powershell
 dotnet run
 ```
 
-- Left-click the taskbar meter to cycle through `100`, `84`, `7`, and `--`.
-- Right-click to select a state, compare the `系统极简` and `状态强调` styles, or exit.
-- The probe currently targets the empty left side of the primary, bottom-aligned Windows 11 taskbar.
+- Left-click the taskbar meter to open or close quota details.
+- Right-click to refresh, open details, or exit.
+- Quotas refresh every 60 seconds. Read failures display `--`; simulated or cached values are never substituted.
+- The current host targets the empty left side of the primary, bottom-aligned Windows 11 taskbar.
+- If Codex is installed outside the standard npm location, set `AGENT_METER_CODEX_PATH` to its `codex.exe` path.
 
 Run the renderer self-check without opening the tray UI:
 
