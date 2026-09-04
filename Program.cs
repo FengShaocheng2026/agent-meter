@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Drawing.Drawing2D;
 using System.Drawing.Text;
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace AgentMeter;
 
@@ -14,26 +15,56 @@ internal static class Program
         {
             CodexQuotaReader.SelfTest();
             MeterRenderer.SelfTest();
+            SettingsForm.SelfTest();
+            ProductIcon.SelfTest();
             return;
         }
 
         ApplicationConfiguration.Initialize();
-        Application.Run(new TaskbarMeterForm());
+        try
+        {
+            Application.Run(new AgentMeterApplicationContext());
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(
+                $"AgentMeter 无法启动。\n\n{exception.Message}",
+                "AgentMeter",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
     }
 }
 
 internal sealed class TaskbarMeterForm : Form
 {
     private readonly ToolTip toolTip = new();
-    private readonly System.Windows.Forms.Timer refreshTimer = new() { Interval = 60_000 };
-    private readonly CodexQuotaReader quotaReader = new();
     private readonly QuotaDetailsForm detailsForm;
-    private QuotaDisplayState state = QuotaDisplayState.CreateLoading();
+    private readonly IntPtr taskbar;
+    private readonly Func<Task> refreshRequested;
+    private readonly Action<TaskbarMeterForm> settingsRequested;
+    private readonly Action exitRequested;
+    private QuotaDisplayState state;
     private bool hovered;
-    private bool refreshing;
 
-    public TaskbarMeterForm()
+    public TaskbarMeterForm(
+        IntPtr taskbar,
+        QuotaDisplayState initialState,
+        Func<Task> refreshRequested,
+        Action<TaskbarMeterForm> settingsRequested,
+        Action exitRequested)
     {
+        if (taskbar == IntPtr.Zero)
+        {
+            throw new ArgumentException("任务栏窗口句柄不能为空。", nameof(taskbar));
+        }
+
+        this.taskbar = taskbar;
+        state = initialState;
+        this.refreshRequested = refreshRequested;
+        this.settingsRequested = settingsRequested;
+        this.exitRequested = exitRequested;
+
         Text = "AgentMeter";
         AccessibleName = state.Tooltip;
         FormBorderStyle = FormBorderStyle.None;
@@ -45,21 +76,18 @@ internal sealed class TaskbarMeterForm : Form
         DoubleBuffered = true;
 
         detailsForm = new QuotaDetailsForm();
-        detailsForm.RefreshRequested += async (_, _) => await RefreshQuotaAsync();
+        detailsForm.RefreshRequested += async (_, _) => await this.refreshRequested();
 
-        var menu = new ContextMenuStrip();
-        menu.Items.Add("打开额度详情", null, (_, _) => ToggleDetails());
-        menu.Items.Add("立即刷新", null, async (_, _) => await RefreshQuotaAsync());
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("退出", null, (_, _) => Close());
-        ContextMenuStrip = menu;
+        ContextMenuStrip = AgentMeterMenu.Create(
+            ToggleDetails,
+            this.refreshRequested,
+            () => this.settingsRequested(this),
+            this.exitRequested);
 
         toolTip.InitialDelay = 250;
         toolTip.ReshowDelay = 100;
         toolTip.AutoPopDelay = 10000;
         UpdateTooltip();
-
-        refreshTimer.Tick += async (_, _) => await RefreshQuotaAsync();
     }
 
     protected override bool ShowWithoutActivation => true;
@@ -71,26 +99,6 @@ internal sealed class TaskbarMeterForm : Form
             var parameters = base.CreateParams;
             parameters.ExStyle |= NativeMethods.WsExToolWindow | NativeMethods.WsExNoActivate;
             return parameters;
-        }
-    }
-
-    protected override void OnShown(EventArgs eventArgs)
-    {
-        base.OnShown(eventArgs);
-        try
-        {
-            AttachToTaskbar();
-            refreshTimer.Start();
-            BeginInvoke(async () => await RefreshQuotaAsync());
-        }
-        catch (Exception exception)
-        {
-            MessageBox.Show(
-                $"无法挂载到 Windows 任务栏。\n\n{exception.Message}",
-                "AgentMeter",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Error);
-            Close();
         }
     }
 
@@ -127,75 +135,16 @@ internal sealed class TaskbarMeterForm : Form
     {
         if (disposing)
         {
-            refreshTimer.Dispose();
             toolTip.Dispose();
             detailsForm.Dispose();
+            ContextMenuStrip?.Dispose();
         }
 
         base.Dispose(disposing);
     }
 
-    private async Task RefreshQuotaAsync()
+    public void AttachToTaskbar()
     {
-        if (refreshing)
-        {
-            return;
-        }
-
-        refreshing = true;
-        detailsForm.SetRefreshing(true);
-        try
-        {
-            state = QuotaDisplayState.Available(await quotaReader.ReadAsync());
-        }
-        catch (Exception exception)
-        {
-            state = QuotaDisplayState.Unavailable(exception.Message);
-        }
-        finally
-        {
-            refreshing = false;
-            detailsForm.SetRefreshing(false);
-            ApplyState();
-        }
-    }
-
-    private void ApplyState()
-    {
-        AccessibleName = state.Tooltip;
-        detailsForm.ApplyState(state);
-        UpdateTooltip();
-        Invalidate();
-    }
-
-    private void ToggleDetails()
-    {
-        if (detailsForm.Visible)
-        {
-            detailsForm.Hide();
-            return;
-        }
-
-        detailsForm.ApplyState(state);
-        var meterBounds = RectangleToScreen(ClientRectangle);
-        var screen = Screen.FromRectangle(meterBounds).WorkingArea;
-        var x = Math.Clamp(meterBounds.Left, screen.Left + 8, screen.Right - detailsForm.Width - 8);
-        var y = Math.Max(screen.Top + 8, meterBounds.Top - detailsForm.Height - 8);
-        detailsForm.Location = new Point(x, y);
-        detailsForm.Show();
-        detailsForm.Activate();
-    }
-
-    private void UpdateTooltip() => toolTip.SetToolTip(this, state.Tooltip);
-
-    private void AttachToTaskbar()
-    {
-        var taskbar = NativeMethods.FindWindow("Shell_TrayWnd", null);
-        if (taskbar == IntPtr.Zero)
-        {
-            throw new Win32Exception("找不到主任务栏窗口 Shell_TrayWnd。");
-        }
-
         var style = NativeMethods.GetWindowStyle(Handle);
         NativeMethods.SetWindowStyle(Handle, (style & ~NativeMethods.WsPopup) | NativeMethods.WsChild);
 
@@ -207,6 +156,11 @@ internal sealed class TaskbarMeterForm : Form
             throw new Win32Exception(error);
         }
 
+        UpdateTaskbarBounds();
+    }
+
+    public void UpdateTaskbarBounds()
+    {
         if (!NativeMethods.GetClientRect(taskbar, out var taskbarRect))
         {
             throw new Win32Exception(Marshal.GetLastPInvokeError());
@@ -227,6 +181,45 @@ internal sealed class TaskbarMeterForm : Form
             throw new Win32Exception(Marshal.GetLastPInvokeError());
         }
     }
+
+    public void ApplyState(QuotaDisplayState newState, bool refreshing)
+    {
+        state = newState;
+        AccessibleName = state.Tooltip;
+        detailsForm.ApplyState(state);
+        detailsForm.SetRefreshing(refreshing);
+        UpdateTooltip();
+        Invalidate();
+    }
+
+    public void ToggleDetails()
+    {
+        if (detailsForm.Visible)
+        {
+            detailsForm.Hide();
+            return;
+        }
+
+        detailsForm.ApplyState(state);
+        var meterBounds = RectangleToScreen(ClientRectangle);
+        var screen = Screen.FromRectangle(meterBounds).WorkingArea;
+        var x = Math.Clamp(meterBounds.Left, screen.Left + 8, screen.Right - detailsForm.Width - 8);
+        var y = Math.Max(screen.Top + 8, meterBounds.Top - detailsForm.Height - 8);
+        detailsForm.Location = new Point(x, y);
+        detailsForm.Show();
+        detailsForm.Activate();
+    }
+
+    public bool IsOnScreen(Screen screen)
+    {
+        var meterBounds = RectangleToScreen(ClientRectangle);
+        return string.Equals(
+            Screen.FromRectangle(meterBounds).DeviceName,
+            screen.DeviceName,
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void UpdateTooltip() => toolTip.SetToolTip(this, state.Tooltip);
 }
 
 internal sealed class QuotaDetailsForm : Form
@@ -531,6 +524,9 @@ internal sealed record QuotaDisplayState(QuotaSnapshot? Snapshot, bool Loading, 
 
 internal static class NativeMethods
 {
+    private const string PrimaryTaskbarClass = "Shell_TrayWnd";
+    private const string SecondaryTaskbarClass = "Shell_SecondaryTrayWnd";
+
     public const int WsExToolWindow = 0x00000080;
     public const int WsExNoActivate = 0x08000000;
     public const long WsChild = 0x40000000L;
@@ -541,8 +537,36 @@ internal static class NativeMethods
 
     private const int GwlStyle = -16;
 
+    public static IReadOnlyList<IntPtr> FindTaskbarWindows()
+    {
+        var taskbars = new List<IntPtr>();
+        if (!EnumWindows((window, _) =>
+            {
+                var className = new StringBuilder(128);
+                if (GetClassName(window, className, className.Capacity) > 0
+                    && (className.ToString() == PrimaryTaskbarClass
+                        || className.ToString() == SecondaryTaskbarClass))
+                {
+                    taskbars.Add(window);
+                }
+
+                return true;
+            }, IntPtr.Zero))
+        {
+            throw new Win32Exception(Marshal.GetLastPInvokeError());
+        }
+
+        return taskbars;
+    }
+
+    private delegate bool EnumWindowsCallback(IntPtr window, IntPtr parameter);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool EnumWindows(EnumWindowsCallback callback, IntPtr parameter);
+
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    public static extern IntPtr FindWindow(string className, string? windowName);
+    private static extern int GetClassName(IntPtr window, StringBuilder className, int maximumCount);
 
     [DllImport("user32.dll", SetLastError = true)]
     public static extern IntPtr SetParent(IntPtr child, IntPtr newParent);

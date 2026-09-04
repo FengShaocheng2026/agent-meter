@@ -5,5 +5,6 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <ApplicationIcon>assets\AgentMeter.ico</ApplicationIcon>
   </PropertyGroup>
 </Project>

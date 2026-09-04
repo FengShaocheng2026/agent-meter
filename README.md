@@ -15,9 +15,11 @@ dotnet run
 ```
 
 - Left-click the taskbar meter to open or close quota details.
-- Right-click to refresh, open details, or exit.
+- Right-click to refresh, open details, change settings, or exit.
+- Left-click or right-click the notification-area icon to open the same complete menu.
 - Quotas refresh every 60 seconds. Read failures display `--`; simulated or cached values are never substituted.
-- The current host targets the empty left side of the primary, bottom-aligned Windows 11 taskbar.
+- The meter appears on the empty left side of every enabled, bottom-aligned Windows 11 taskbar.
+- Enable or disable startup after Windows sign-in from the settings window.
 - If Codex is installed outside the standard npm location, set `AGENT_METER_CODEX_PATH` to its `codex.exe` path.
 
 Run the renderer self-check without opening the tray UI:
