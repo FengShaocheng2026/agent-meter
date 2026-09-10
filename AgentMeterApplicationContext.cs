@@ -112,7 +112,9 @@ internal sealed class AgentMeterApplicationContext : ApplicationContext
         }
         catch (Exception exception)
         {
-            state = QuotaDisplayState.Unavailable(exception.Message);
+            state = state.Snapshot is { } snapshot
+                ? QuotaDisplayState.Stale(snapshot, exception.Message)
+                : QuotaDisplayState.Unavailable(exception.Message);
         }
         finally
         {
@@ -244,8 +246,13 @@ internal sealed class AgentMeterApplicationContext : ApplicationContext
         target?.ToggleDetails();
     }
 
-    private static void ShowSettings(TaskbarMeterForm? owner)
+    private void ShowSettings(TaskbarMeterForm? owner)
     {
+        foreach (var meter in meterForms.Values)
+        {
+            meter.HideDetails();
+        }
+
         using var settings = new SettingsForm();
         if (owner is null)
         {

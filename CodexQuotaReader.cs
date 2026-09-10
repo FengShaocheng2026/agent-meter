@@ -7,6 +7,34 @@ internal sealed class CodexQuotaReader
 {
     public async Task<QuotaSnapshot> ReadAsync(CancellationToken cancellationToken = default)
     {
+        Exception? lastError = null;
+        var attemptsMade = 0;
+        for (var attempt = 1; attempt <= 2; attempt++)
+        {
+            attemptsMade = attempt;
+            try
+            {
+                return await ReadOnceAsync(cancellationToken);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+            {
+                lastError = exception;
+                if (attempt < 2 && !IsRateLimit(exception.Message))
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
+                    continue;
+                }
+
+                break;
+            }
+        }
+
+        var retryNote = attemptsMade > 1 ? "（已重试 1 次）" : string.Empty;
+        throw new InvalidOperationException($"读取 Codex 额度失败{retryNote}：{lastError!.Message}", lastError);
+    }
+
+    private async Task<QuotaSnapshot> ReadOnceAsync(CancellationToken cancellationToken)
+    {
         var executable = FindCodexExecutable();
         var startInfo = new ProcessStartInfo(executable, "app-server --stdio")
         {
@@ -24,7 +52,7 @@ internal sealed class CodexQuotaReader
         }
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(TimeSpan.FromSeconds(12));
+        timeout.CancelAfter(TimeSpan.FromSeconds(20));
         var stderrTask = process.StandardError.ReadToEndAsync(timeout.Token);
 
         try
@@ -57,6 +85,7 @@ internal sealed class CodexQuotaReader
 
                 if (requestId == 1)
                 {
+                    ThrowIfServerError(root);
                     await SendAsync(process, new { jsonrpc = "2.0", method = "initialized", @params = new { } });
                     await SendAsync(process, new
                     {
@@ -68,11 +97,7 @@ internal sealed class CodexQuotaReader
                 }
                 else if (requestId == 2)
                 {
-                    if (root.TryGetProperty("error", out _))
-                    {
-                        throw new InvalidOperationException("Codex app-server 返回错误。");
-                    }
-
+                    ThrowIfServerError(root);
                     return ParseRateLimits(root.GetProperty("result").GetRawText(), DateTimeOffset.Now);
                 }
             }
@@ -140,6 +165,16 @@ internal sealed class CodexQuotaReader
         {
             throw new InvalidOperationException("Codex quota parser self-test failed.");
         }
+
+        using var errorDocument = JsonDocument.Parse("""{"error":{"code":429,"message":"rate limit exceeded"}}""");
+        try
+        {
+            ThrowIfServerError(errorDocument.RootElement);
+            throw new InvalidOperationException("Codex error parser self-test failed.");
+        }
+        catch (InvalidOperationException exception) when (exception.Message == "Codex app-server 错误 429：rate limit exceeded")
+        {
+        }
     }
 
     private static void AddWindow(JsonElement rateLimits, string propertyName, ICollection<QuotaWindow> windows)
@@ -166,6 +201,34 @@ internal sealed class CodexQuotaReader
 
     private static Task SendAsync(Process process, object message) =>
         process.StandardInput.WriteLineAsync(JsonSerializer.Serialize(message));
+
+    private static void ThrowIfServerError(JsonElement response)
+    {
+        if (!response.TryGetProperty("error", out var error))
+        {
+            return;
+        }
+
+        var code = error.TryGetProperty("code", out var codeValue) ? codeValue.ToString() : "未知";
+        var message = error.TryGetProperty("message", out var messageValue)
+            ? messageValue.GetString()?.Replace('\r', ' ').Replace('\n', ' ').Trim()
+            : null;
+        if (message?.Length > 200)
+        {
+            message = message[..200] + "…";
+        }
+
+        throw new InvalidOperationException(
+            string.IsNullOrWhiteSpace(message)
+                ? $"Codex app-server 错误 {code}。"
+                : $"Codex app-server 错误 {code}：{message}");
+    }
+
+    private static bool IsRateLimit(string message) =>
+        message.Contains("429", StringComparison.OrdinalIgnoreCase)
+        || message.Contains("rate limit", StringComparison.OrdinalIgnoreCase)
+        || message.Contains("too many requests", StringComparison.OrdinalIgnoreCase)
+        || message.Contains("限流", StringComparison.OrdinalIgnoreCase);
 
     private static string FindCodexExecutable()
     {

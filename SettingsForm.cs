@@ -14,13 +14,17 @@ internal sealed class SettingsForm : Form
     private readonly ToggleSwitch startWithWindows = new()
     {
         AccessibleName = "登录 Windows 后自动启动 AgentMeter",
-        Location = new Point(365, 32)
+        Anchor = AnchorStyles.Top | AnchorStyles.Right,
+        Location = new Point(530, 42)
     };
     private readonly Label statusLabel = new()
     {
-        AutoSize = true,
         ForeColor = SecondaryText,
-        Location = new Point(24, 202),
+        Location = new Point(24, 250),
+        Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom,
+        AutoEllipsis = true,
+        AutoSize = false,
+        Size = new Size(480, 40),
         Text = "更改会立即生效"
     };
     private readonly Icon productIcon = ProductIcon.Load();
@@ -30,16 +34,18 @@ internal sealed class SettingsForm : Form
     {
         Text = "AgentMeter 设置";
         Icon = productIcon;
-        FormBorderStyle = FormBorderStyle.FixedDialog;
+        FormBorderStyle = FormBorderStyle.Sizable;
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.CenterParent;
-        MaximizeBox = false;
+        MaximizeBox = true;
         MinimizeBox = false;
+        Font = new Font("Segoe UI", 10f);
+        AutoScaleDimensions = new SizeF(96f, 96f);
         AutoScaleMode = AutoScaleMode.Dpi;
-        ClientSize = new Size(480, 280);
+        ClientSize = new Size(640, 360);
+        MinimumSize = new Size(560, 340);
         BackColor = WindowBackground;
         ForeColor = PrimaryText;
-        Font = new Font("Segoe UI", 10f);
 
         var title = new Label
         {
@@ -53,28 +59,32 @@ internal sealed class SettingsForm : Form
         {
             AutoSize = true,
             ForeColor = SecondaryText,
-            Location = new Point(23, 56),
+            Location = new Point(23, 60),
             Text = "管理 AgentMeter 在这台电脑上的行为"
         };
         var card = new Panel
         {
             BackColor = CardBackground,
-            Location = new Point(20, 92),
-            Size = new Size(440, 94)
+            Location = new Point(20, 105),
+            Size = new Size(600, 120),
+            Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right
         };
         var settingTitle = new Label
         {
             AutoSize = true,
             Font = new Font("Segoe UI Semibold", 10.5f),
             ForeColor = PrimaryText,
-            Location = new Point(18, 18),
+            Location = new Point(18, 22),
             Text = "登录时启动"
         };
         var description = new Label
         {
-            AutoSize = true,
+            AutoSize = false,
+            AutoEllipsis = true,
             ForeColor = SecondaryText,
-            Location = new Point(18, 50),
+            Location = new Point(18, 62),
+            Size = new Size(490, 36),
+            Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right,
             Text = "登录当前 Windows 用户后自动运行 AgentMeter"
         };
         var closeButton = new Button
@@ -84,8 +94,9 @@ internal sealed class SettingsForm : Form
             BackColor = Color.FromArgb(58, 58, 58),
             ForeColor = PrimaryText,
             FlatStyle = FlatStyle.Flat,
-            Location = new Point(364, 232),
+            Location = new Point(524, 306),
             Size = new Size(96, 32),
+            Anchor = AnchorStyles.Right | AnchorStyles.Bottom,
             UseVisualStyleBackColor = false
         };
         closeButton.FlatAppearance.BorderSize = 0;
@@ -119,8 +130,27 @@ internal sealed class SettingsForm : Form
     {
         using var form = new SettingsForm();
         _ = form.Handle;
-        using var bitmap = new Bitmap(form.Width, form.Height);
-        form.DrawToBitmap(bitmap, form.ClientRectangle);
+        foreach (var scale in new[] { 1f, 2f })
+        {
+            form.Scale(new SizeF(scale, scale));
+            form.PerformLayout();
+            AssertControlsFit(form);
+            using var bitmap = new Bitmap(form.Width, form.Height);
+            form.DrawToBitmap(bitmap, form.ClientRectangle);
+        }
+    }
+
+    private static void AssertControlsFit(Control parent)
+    {
+        foreach (Control control in parent.Controls)
+        {
+            if (!parent.ClientRectangle.Contains(control.Bounds))
+            {
+                throw new InvalidOperationException($"Settings layout self-test failed: {control.GetType().Name} is outside its parent.");
+            }
+
+            AssertControlsFit(control);
+        }
     }
 
     private void LoadStartupState()

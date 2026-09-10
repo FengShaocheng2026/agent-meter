@@ -210,6 +210,8 @@ internal sealed class TaskbarMeterForm : Form
         detailsForm.Activate();
     }
 
+    public void HideDetails() => detailsForm.Hide();
+
     public bool IsOnScreen(Screen screen)
     {
         var meterBounds = RectangleToScreen(ClientRectangle);
@@ -304,7 +306,7 @@ internal sealed class QuotaDetailsForm : Form
 
         graphics.DrawLine(separator, 28 * scale, top + 4 * scale, ClientSize.Width - 28 * scale, top + 4 * scale);
         var source = state.Snapshot is { } current
-            ? $"本机 Codex · {FormatFreshness(current.UpdatedAt)}"
+            ? $"本机 Codex · {(state.IsStale ? "旧数据 · " : string.Empty)}{FormatFreshness(current.UpdatedAt)}"
             : "本机 Codex · 已断开";
         graphics.DrawString(source, bodyFont, mutedBrush, 28 * scale, top + 31 * scale);
 
@@ -343,9 +345,9 @@ internal sealed class QuotaDetailsForm : Form
 
     private void DrawConnectionStatus(Graphics graphics, Font font, float scale)
     {
-        var connected = state.Snapshot is not null;
+        var connected = state.Snapshot is not null && !state.IsStale;
         var color = connected ? Color.FromArgb(100, 210, 135) : Color.FromArgb(255, 184, 95);
-        var label = connected ? "实时" : state.Loading ? "连接中" : "断开";
+        var label = connected ? "实时" : state.IsStale ? "旧数据" : state.Loading ? "连接中" : "断开";
         using var brush = new SolidBrush(color);
         var size = graphics.MeasureString(label, font);
         var labelX = ClientSize.Width - 28 * scale - size.Width;
@@ -436,7 +438,7 @@ internal static class MeterRenderer
             StartCap = LineCap.Round,
             EndCap = LineCap.Round
         };
-        using var valuePen = new Pen(StatusColor(state.Metric?.RemainingPercent), 2.8f * scale)
+        using var valuePen = new Pen(StatusColor(state.IsStale ? null : state.Metric?.RemainingPercent), 2.8f * scale)
         {
             StartCap = LineCap.Round,
             EndCap = LineCap.Round
@@ -474,7 +476,13 @@ internal static class MeterRenderer
         var available = QuotaDisplayState.Available(new QuotaSnapshot(
             [new QuotaWindow("1 周", "周", 1, 99, DateTimeOffset.Now.AddDays(7))],
             DateTimeOffset.Now));
-        foreach (var state in new[] { available, QuotaDisplayState.CreateLoading(), QuotaDisplayState.Unavailable("test") })
+        foreach (var state in new[]
+                 {
+                     available,
+                     QuotaDisplayState.Stale(available.Snapshot!, "test"),
+                     QuotaDisplayState.CreateLoading(),
+                     QuotaDisplayState.Unavailable("test")
+                 })
         {
             using var bitmap = new Bitmap(190, 84);
             using var graphics = Graphics.FromImage(bitmap);
@@ -509,15 +517,18 @@ internal static class MeterRenderer
 
 internal sealed record QuotaDisplayState(QuotaSnapshot? Snapshot, bool Loading, string? Error)
 {
+    public bool IsStale => Snapshot is not null && Error is not null;
     public QuotaWindow? Metric => Snapshot?.Windows.OrderBy(window => window.RemainingPercent).FirstOrDefault();
 
     public string Tooltip => Snapshot is { } snapshot
         ? string.Join("\n", snapshot.Windows.Select(window =>
               $"Codex {window.Label}剩余 {window.RemainingPercent}% | {window.ResetsAt.ToLocalTime():M 月 d 日 HH:mm} 重置"))
           + $"\n本机 Codex | {snapshot.UpdatedAt:HH:mm:ss} 更新"
+          + (IsStale ? $" | 当前读取失败：{Error}" : string.Empty)
         : Loading ? "正在读取本机 Codex 额度" : $"Codex 额度暂不可用 | {Error}";
 
     public static QuotaDisplayState Available(QuotaSnapshot snapshot) => new(snapshot, false, null);
+    public static QuotaDisplayState Stale(QuotaSnapshot snapshot, string error) => new(snapshot, false, error);
     public static QuotaDisplayState CreateLoading() => new(null, true, null);
     public static QuotaDisplayState Unavailable(string error) => new(null, false, error);
 }
