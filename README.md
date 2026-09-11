@@ -22,7 +22,7 @@ dotnet run
 - The meter appears on the empty left side of every enabled, bottom-aligned Windows 11 taskbar.
 - Enable or disable startup after Windows sign-in from the settings window.
 - Opening settings closes any open quota details panel. The settings window opens larger, follows per-monitor DPI, and can be resized when moving between 1080p and 4K displays.
-- If Codex is installed outside the standard npm location, set `AGENT_METER_CODEX_PATH` to its `codex.exe` path.
+- AgentMeter automatically checks the Codex desktop app, native `codex.exe` entries on `PATH`, and standard or custom npm global directories. If Codex is installed elsewhere, set `AGENT_METER_CODEX_PATH` to its `codex.exe` path.
 
 Run the renderer self-check without opening the tray UI:
 

@@ -238,25 +238,77 @@ internal sealed class CodexQuotaReader
             return configured;
         }
 
-        var packageRoot = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            "npm",
-            "node_modules",
-            "@openai",
-            "codex",
-            "node_modules");
-        if (Directory.Exists(packageRoot))
+        var desktopRoot = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "OpenAI",
+            "Codex",
+            "bin");
+        var desktopExecutable = FindNewestCodexExecutable(desktopRoot);
+        if (desktopExecutable is not null)
         {
-            var executable = Directory.EnumerateFiles(packageRoot, "codex.exe", SearchOption.AllDirectories)
-                .FirstOrDefault(path => string.Equals(Path.GetFileName(path), "codex.exe", StringComparison.OrdinalIgnoreCase));
-            if (executable is not null)
+            return desktopExecutable;
+        }
+
+        var pathDirectories = (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
+            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(path => path.Trim('"'))
+            .Where(Directory.Exists)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        foreach (var pathDirectory in pathDirectories)
+        {
+            var executable = Path.Combine(pathDirectory, "codex.exe");
+            if (File.Exists(executable))
             {
                 return executable;
             }
         }
 
+        var npmRoots = pathDirectories
+            .Where(path => File.Exists(Path.Combine(path, "codex.cmd")))
+            .Select(path => Path.Combine(path, "node_modules", "@openai", "codex", "node_modules"))
+            .Append(Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "npm",
+                "node_modules",
+                "@openai",
+                "codex",
+                "node_modules"))
+            .Distinct(StringComparer.OrdinalIgnoreCase);
+        foreach (var npmRoot in npmRoots)
+        {
+            var npmExecutable = FindNewestCodexExecutable(npmRoot);
+            if (npmExecutable is not null)
+            {
+                return npmExecutable;
+            }
+        }
+
         throw new FileNotFoundException(
-            "找不到 Codex CLI。请安装 @openai/codex，或设置 AGENT_METER_CODEX_PATH 指向 codex.exe。");
+            "找不到 Codex CLI。请安装 Codex 桌面版或 @openai/codex，或设置 AGENT_METER_CODEX_PATH 指向 codex.exe。");
+    }
+
+    private static string? FindNewestCodexExecutable(string root)
+    {
+        if (!Directory.Exists(root))
+        {
+            return null;
+        }
+
+        try
+        {
+            return Directory.EnumerateFiles(root, "codex.exe", SearchOption.AllDirectories)
+                .OrderByDescending(File.GetLastWriteTimeUtc)
+                .FirstOrDefault();
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return null;
+        }
+        catch (IOException)
+        {
+            return null;
+        }
     }
 }
 
