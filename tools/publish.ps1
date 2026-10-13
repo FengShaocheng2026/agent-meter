@@ -9,7 +9,7 @@ if (Test-Path -LiteralPath $publish) { throw "Move existing package directory fi
 dotnet publish (Join-Path $projectRoot 'AgentMeter.csproj') -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=false -p:DebugType=None -p:DebugSymbols=false -o $publish
 if ($LASTEXITCODE -ne 0) { throw 'dotnet publish failed' }
 $exe = Join-Path $publish 'AgentMeter.exe'
-$test = Start-Process -FilePath $exe -ArgumentList '--self-test' -Wait -PassThru
+$test = Start-Process -FilePath $exe -ArgumentList '--self-test' -Wait -PassThru -WindowStyle Hidden
 if ($test.ExitCode -ne 0) { throw "Release self-test failed: $($test.ExitCode)" }
 Copy-Item -LiteralPath (Join-Path $projectRoot 'README.md') -Destination $publish
 $zip = Join-Path $output "$name.zip"

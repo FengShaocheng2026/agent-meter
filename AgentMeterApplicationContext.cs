@@ -47,6 +47,7 @@ internal sealed class AgentMeterApplicationContext : ApplicationContext
         if (disposing)
         {
             Application.Idle -= OnInitialIdle;
+            quotaReader.Dispose();
             refreshTimer.Dispose();
             taskbarTimer.Dispose();
             CloseAllMeters();
@@ -279,6 +280,7 @@ internal sealed class AgentMeterApplicationContext : ApplicationContext
         }
 
         exiting = true;
+        quotaReader.Dispose();
         refreshTimer.Stop();
         taskbarTimer.Stop();
         trayIcon.Visible = false;

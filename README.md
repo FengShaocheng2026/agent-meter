@@ -17,6 +17,7 @@ dotnet run
 - Left-click the taskbar meter to open or close quota details.
 - Right-click to refresh, open details, change settings, or exit.
 - Left-click or right-click the notification-area icon to open the same complete menu.
+- AgentMeter reuses one background Codex app-server process, restarts it after connection failures, and closes it on exit.
 - Quotas refresh every 60 seconds. A transient failed read is retried once; rate-limit errors are not retried. If reading still fails, the last successful value remains visible and is clearly marked as stale.
 - Server error codes and messages are shown in the tooltip to help distinguish rate limiting, authentication, and protocol failures.
 - The meter appears on the empty left side of every enabled, bottom-aligned Windows 11 taskbar.
@@ -30,9 +31,13 @@ Run the renderer self-check without opening the tray UI:
 dotnet run -- --self-test
 ```
 
+Run the local fake-server lifecycle check (no account requests):
+
+    pwsh -NoProfile -File tools/test-quota-reader.ps1
+
 ## Portable release
 
-Download `AgentMeter-0.1.2-win-x64.zip` from GitHub Releases and extract it to a permanent folder. Run `AgentMeter.exe`. The Windows x64 package includes the .NET runtime; Codex must still be installed and signed in. The package is currently unsigned.
+Download `AgentMeter-0.1.3-win-x64.zip` from GitHub Releases and extract it to a permanent folder. Run `AgentMeter.exe`. The Windows x64 package includes the .NET runtime; Codex must still be installed and signed in. The package is currently unsigned.
 
 ABoring Launcher can install the ZIP directly from this repository's Release. Select `AgentMeter.exe` as the entry point. Exit AgentMeter from its tray menu before updating. If Windows startup is enabled, disable and re-enable it after moving or updating the executable so that the startup path follows the new location.
 

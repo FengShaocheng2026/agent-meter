@@ -3,127 +3,159 @@ using System.Text.Json;
 
 namespace AgentMeter;
 
-internal sealed class CodexQuotaReader
+internal sealed class CodexQuotaReader : IDisposable
 {
+    private readonly SemaphoreSlim readLock = new(1, 1);
+    private readonly CancellationTokenSource lifetime = new();
+    private readonly object processLock = new();
+    private Process? server;
+    private int nextRequestId;
+    private bool disposed;
+
     public async Task<QuotaSnapshot> ReadAsync(CancellationToken cancellationToken = default)
     {
-        Exception? lastError = null;
-        var attemptsMade = 0;
-        for (var attempt = 1; attempt <= 2; attempt++)
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetime.Token);
+        var token = linked.Token;
+        await readLock.WaitAsync(token);
+        try
         {
-            attemptsMade = attempt;
-            try
+            Exception? lastError = null;
+            var attemptsMade = 0;
+            for (var attempt = 1; attempt <= 2; attempt++)
             {
-                return await ReadOnceAsync(cancellationToken);
-            }
-            catch (Exception exception) when (exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
-            {
-                lastError = exception;
-                if (attempt < 2 && !IsRateLimit(exception.Message))
+                token.ThrowIfCancellationRequested();
+                attemptsMade = attempt;
+                try
                 {
-                    await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
-                    continue;
+                    return await ReadOnceAsync(token);
                 }
-
-                break;
+                catch (Exception exception)
+                {
+                    StopServer();
+                    token.ThrowIfCancellationRequested();
+                    lastError = exception;
+                    if (attempt < 2 && !IsRateLimit(exception.Message))
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(2), token);
+                        continue;
+                    }
+                    break;
+                }
             }
-        }
 
-        var retryNote = attemptsMade > 1 ? "（已重试 1 次）" : string.Empty;
-        throw new InvalidOperationException($"读取 Codex 额度失败{retryNote}：{lastError!.Message}", lastError);
+            var retryNote = attemptsMade > 1 ? "（已重试 1 次）" : string.Empty;
+            throw new InvalidOperationException($"读取 Codex 额度失败{retryNote}：{lastError!.Message}", lastError);
+        }
+        finally
+        {
+            readLock.Release();
+        }
     }
 
     private async Task<QuotaSnapshot> ReadOnceAsync(CancellationToken cancellationToken)
     {
-        var executable = FindCodexExecutable();
-        var startInfo = new ProcessStartInfo(executable, "app-server --stdio")
-        {
-            UseShellExecute = false,
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true
-        };
-
-        using var process = new Process { StartInfo = startInfo };
-        if (!process.Start())
-        {
-            throw new InvalidOperationException("无法启动 Codex app-server。");
-        }
-
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(20));
-        var stderrTask = process.StandardError.ReadToEndAsync(timeout.Token);
-
         try
         {
-            await SendAsync(process, new
+            Process process;
+            bool initialize;
+            lock (processLock)
             {
-                jsonrpc = "2.0",
-                id = 1,
-                method = "initialize",
-                @params = new
+                cancellationToken.ThrowIfCancellationRequested();
+                initialize = server is null || server.HasExited;
+                if (initialize)
+                {
+                    StopServer();
+                    server = new Process
+                    {
+                        StartInfo = new ProcessStartInfo(FindCodexExecutable(), "app-server --stdio")
+                        {
+                            UseShellExecute = false,
+                            RedirectStandardInput = true,
+                            RedirectStandardOutput = true,
+                            RedirectStandardError = true,
+                            CreateNoWindow = true
+                        }
+                    };
+                    if (!server.Start())
+                    {
+                        throw new InvalidOperationException("无法启动 Codex app-server。");
+                    }
+                    // Drain diagnostics without retaining account details or unbounded output.
+                    server.ErrorDataReceived += (_, _) => { };
+                    server.BeginErrorReadLine();
+                }
+                process = server!;
+            }
+
+            if (initialize)
+            {
+                await RequestAsync(process, "initialize", new
                 {
                     clientInfo = new { name = "agent-meter", title = "AgentMeter", version = "0.1.0" },
                     capabilities = new { experimentalApi = true }
-                }
-            });
-
-            while (await process.StandardOutput.ReadLineAsync(timeout.Token) is { } line)
-            {
-                if (string.IsNullOrWhiteSpace(line))
-                {
-                    continue;
-                }
-
-                using var message = JsonDocument.Parse(line);
-                var root = message.RootElement;
-                if (!root.TryGetProperty("id", out var id) || !id.TryGetInt32(out var requestId))
-                {
-                    continue;
-                }
-
-                if (requestId == 1)
-                {
-                    ThrowIfServerError(root);
-                    await SendAsync(process, new { jsonrpc = "2.0", method = "initialized", @params = new { } });
-                    await SendAsync(process, new
-                    {
-                        jsonrpc = "2.0",
-                        id = 2,
-                        method = "account/rateLimits/read",
-                        @params = new { }
-                    });
-                }
-                else if (requestId == 2)
-                {
-                    ThrowIfServerError(root);
-                    return ParseRateLimits(root.GetProperty("result").GetRawText(), DateTimeOffset.Now);
-                }
+                }, timeout.Token);
+                await SendAsync(process, new { jsonrpc = "2.0", method = "initialized", @params = new { } }, timeout.Token);
             }
 
-            await stderrTask;
-            throw new InvalidOperationException("Codex app-server 未返回额度数据。");
+            var result = await RequestAsync(process, "account/rateLimits/read", new { }, timeout.Token);
+            return ParseRateLimits(result, DateTimeOffset.Now);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             throw new TimeoutException("读取 Codex 额度超时。");
         }
-        finally
-        {
-            if (!process.HasExited)
-            {
-                process.Kill(entireProcessTree: true);
-            }
+    }
 
+    private async Task<string> RequestAsync(Process process, string method, object parameters, CancellationToken token)
+    {
+        var requestId = ++nextRequestId;
+        await SendAsync(process, new { jsonrpc = "2.0", id = requestId, method, @params = parameters }, token);
+        while (await process.StandardOutput.ReadLineAsync(token) is { } line)
+        {
+            if (string.IsNullOrWhiteSpace(line)) continue;
+            using var message = JsonDocument.Parse(line);
+            var root = message.RootElement;
+            if (!root.TryGetProperty("id", out var id) || !id.TryGetInt32(out var responseId) || responseId != requestId)
+            {
+                continue;
+            }
+            ThrowIfServerError(root);
+            return root.GetProperty("result").GetRawText();
+        }
+        throw new IOException("Codex app-server 连接已关闭。");
+    }
+
+    private void StopServer()
+    {
+        lock (processLock)
+        {
+            if (server is null) return;
             try
             {
-                await stderrTask;
+                if (!server.HasExited) server.Kill(entireProcessTree: true);
             }
-            catch
+            catch (InvalidOperationException)
             {
-                // The user-facing state intentionally excludes app-server stderr and local paths.
+                // The process may have exited already or failed to start.
             }
+            finally
+            {
+                server.Dispose();
+                server = null;
+            }
+        }
+    }
+
+    public void Dispose()
+    {
+        lock (processLock)
+        {
+            if (disposed) return;
+            disposed = true;
+            lifetime.Cancel();
+            StopServer();
         }
     }
 
@@ -199,8 +231,8 @@ internal sealed class CodexQuotaReader
         _ => ($"{Math.Max(1, minutes / 1440)} 天", $"{Math.Max(1, minutes / 1440)}天")
     };
 
-    private static Task SendAsync(Process process, object message) =>
-        process.StandardInput.WriteLineAsync(JsonSerializer.Serialize(message));
+    private static Task SendAsync(Process process, object message, CancellationToken token) =>
+        process.StandardInput.WriteLineAsync(JsonSerializer.Serialize(message).AsMemory(), token);
 
     private static void ThrowIfServerError(JsonElement response)
     {

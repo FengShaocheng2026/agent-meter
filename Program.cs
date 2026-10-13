@@ -30,7 +30,8 @@ internal static class Program
         ApplicationConfiguration.Initialize();
         try
         {
-            Application.Run(new AgentMeterApplicationContext());
+            using var context = new AgentMeterApplicationContext();
+            Application.Run(context);
         }
         catch (Exception exception)
         {
