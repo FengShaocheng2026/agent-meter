@@ -32,7 +32,7 @@ dotnet run -- --self-test
 
 ## Portable release
 
-Download `AgentMeter-0.1.0-win-x64.zip` from GitHub Releases and extract it to a permanent folder. Run `AgentMeter.exe`. The Windows x64 package includes the .NET runtime; Codex must still be installed and signed in. The package is currently unsigned.
+Download `AgentMeter-0.1.1-win-x64.zip` from GitHub Releases and extract it to a permanent folder. Run `AgentMeter.exe`. The Windows x64 package includes the .NET runtime; Codex must still be installed and signed in. The package is currently unsigned.
 
 ABoring Launcher can install the ZIP directly from this repository's Release. Select `AgentMeter.exe` as the entry point. Exit AgentMeter from its tray menu before updating. If Windows startup is enabled, disable and re-enable it after moving or updating the executable so that the startup path follows the new location.
 
@@ -43,3 +43,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/publish.ps1
 ```
 
 The ZIP and SHA-256 checksum are written to `artifacts/`. Move the existing versioned output directory before rebuilding the same version. The source checkout now lives under `ABoringStudio/agent-meter`.
+
+### Memory and packaging
+
+Version 0.1.1 disables compression inside the single-file executable. The download is still ZIP-compressed and self-contained. Internal compression saved executable disk space but raised runtime private memory in the measured Windows workload; do not re-enable it without a memory comparison.
+
+On 2026-10-13, fresh processes built from the same application code were sampled over one minute: compressed single-file private bytes were 53.8-58.7 MiB after startup, while uncompressed single-file private bytes were 22.1-31.1 MiB at the same sampling points. The previously running installed process used 95.8-98.6 MiB, but had a different lifetime and interaction history. These are private committed bytes, not Task Manager's private working set. Actual usage varies with UI interactions, runtime caches and garbage collection.
+
+A separate 40-second .NET counter sample of the installed process showed the managed heap falling from about 10.4 MB to 0.49 MB after garbage collection. This short check did not show retained managed-heap growth; it does not prove the absence of a long-term leak. No forced GC or working-set trimming is used.

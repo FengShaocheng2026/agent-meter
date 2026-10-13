@@ -6,7 +6,7 @@ $name = "AgentMeter-$version-win-x64"
 $output = Join-Path $projectRoot 'artifacts'
 $publish = Join-Path $output $name
 if (Test-Path -LiteralPath $publish) { throw "Move existing package directory first: $publish" }
-dotnet publish (Join-Path $projectRoot 'AgentMeter.csproj') -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -p:DebugType=None -p:DebugSymbols=false -o $publish
+dotnet publish (Join-Path $projectRoot 'AgentMeter.csproj') -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=false -p:DebugType=None -p:DebugSymbols=false -o $publish
 if ($LASTEXITCODE -ne 0) { throw 'dotnet publish failed' }
 $exe = Join-Path $publish 'AgentMeter.exe'
 $test = Start-Process -FilePath $exe -ArgumentList '--self-test' -Wait -PassThru
