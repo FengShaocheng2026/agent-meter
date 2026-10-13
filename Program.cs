@@ -20,6 +20,13 @@ internal static class Program
             return;
         }
 
+        // Stable across installation paths and versions within this Windows session.
+        using var instanceMutex = new Mutex(true, @"Local\ABoringStudio.AgentMeter", out var firstInstance);
+        if (!firstInstance)
+        {
+            return;
+        }
+
         ApplicationConfiguration.Initialize();
         try
         {
