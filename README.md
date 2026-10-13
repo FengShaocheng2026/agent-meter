@@ -29,3 +29,17 @@ Run the renderer self-check without opening the tray UI:
 ```powershell
 dotnet run -- --self-test
 ```
+
+## Portable release
+
+Download `AgentMeter-0.1.0-win-x64.zip` from GitHub Releases and extract it to a permanent folder. Run `AgentMeter.exe`. The Windows x64 package includes the .NET runtime; Codex must still be installed and signed in. The package is currently unsigned.
+
+ABoring Launcher can install the ZIP directly from this repository's Release. Select `AgentMeter.exe` as the entry point. Exit AgentMeter from its tray menu before updating. If Windows startup is enabled, disable and re-enable it after moving or updating the executable so that the startup path follows the new location.
+
+Build and run the release self-check with:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/publish.ps1
+```
+
+The ZIP and SHA-256 checksum are written to `artifacts/`. Move the existing versioned output directory before rebuilding the same version. The source checkout now lives under `ABoringStudio/agent-meter`.
